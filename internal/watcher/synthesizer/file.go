@@ -191,6 +191,8 @@ func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []
 				}
 			}
 		}
+		// Enriched metadata (when present) takes precedence over the JWT claim.
+		coreauth.ApplyCodexSubscriptionAttributes(a)
 	}
 	if provider == "gemini-cli" {
 		if virtuals := SynthesizeGeminiVirtualAuths(a, metadata, now); len(virtuals) > 0 {
