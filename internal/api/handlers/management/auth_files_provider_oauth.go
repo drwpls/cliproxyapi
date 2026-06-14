@@ -31,6 +31,7 @@ type codexOAuthService interface {
 	GenerateAuthURL(state string, pkceCodes *codex.PKCECodes) (string, error)
 	ExchangeCodeForTokens(ctx context.Context, code string, pkceCodes *codex.PKCECodes) (*codex.CodexAuthBundle, error)
 	CreateTokenStorage(bundle *codex.CodexAuthBundle) *codex.CodexTokenStorage
+	EnrichSubscriptionMetadata(ctx context.Context, metadata map[string]any, idToken, accessToken, accountID string) (bool, error)
 }
 
 func (h *Handler) RequestAnthropicToken(c *gin.Context) {
@@ -298,16 +299,34 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		// Create token storage and persist
 		tokenStorage := openaiAuth.CreateTokenStorage(bundle)
 		fileName := codex.CredentialFileName(tokenStorage.Email, planType, hashAccountID, true)
+		metadata := map[string]any{
+			"email":      tokenStorage.Email,
+			"account_id": tokenStorage.AccountID,
+		}
+		// Bound this best-effort lookup so a slow/unresponsive ChatGPT backend
+		// cannot block the token save and OAuth session completion. Mirrors the
+		// SDK device-flow path (sdk/auth/codex_device.go).
+		enrichCtx, cancelEnrich := context.WithTimeout(ctx, 20*time.Second)
+		if _, errEnrich := openaiAuth.EnrichSubscriptionMetadata(
+			enrichCtx,
+			metadata,
+			tokenStorage.IDToken,
+			tokenStorage.AccessToken,
+			tokenStorage.AccountID,
+		); errEnrich != nil {
+			log.Warnf("Codex subscription metadata enrichment failed: %v", errEnrich)
+		}
+		cancelEnrich()
 		record := &coreauth.Auth{
 			ID:       fileName,
 			Provider: "codex",
 			FileName: fileName,
 			Storage:  tokenStorage,
-			Metadata: map[string]any{
-				"email":      tokenStorage.Email,
-				"account_id": tokenStorage.AccountID,
-			},
+			Metadata: metadata,
 		}
+		// Mirror the enriched subscription fields into attributes the runtime
+		// reads (Codex model-catalog selection keys off Attributes["plan_type"]).
+		coreauth.ApplyCodexSubscriptionAttributes(record)
 		if errGuard := guardOAuthSessionPendingForSave(state, "codex"); errGuard != nil {
 			return
 		}

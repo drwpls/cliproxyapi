@@ -34,6 +34,10 @@ func (f *fakeCodexOAuthService) ExchangeCodeForTokens(ctx context.Context, code 
 	}, nil
 }
 
+func (f *fakeCodexOAuthService) EnrichSubscriptionMetadata(ctx context.Context, metadata map[string]any, idToken, accessToken, accountID string) (bool, error) {
+	return false, nil
+}
+
 func (f *fakeCodexOAuthService) CreateTokenStorage(bundle *codex.CodexAuthBundle) *codex.CodexTokenStorage {
 	return &codex.CodexTokenStorage{
 		IDToken:      bundle.TokenData.IDToken,
