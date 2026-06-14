@@ -1525,6 +1525,7 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 		DisableCooling      json.RawMessage                  `json:"disable-cooling"`
 		RequestRetry        *int                             `json:"request-retry"`
 		RequestScopedErrors *[]config.RequestScopedErrorRule `json:"request-scoped-errors"`
+		Priority            *int                             `json:"priority"`
 	}
 	var body struct {
 		Index *int           `json:"index"`
@@ -1604,6 +1605,9 @@ func (h *Handler) PatchCodexKey(c *gin.Context) {
 	}
 	if body.Value.RequestScopedErrors != nil {
 		entry.RequestScopedErrors = append([]config.RequestScopedErrorRule(nil), *body.Value.RequestScopedErrors...)
+	}
+	if body.Value.Priority != nil {
+		entry.Priority = *body.Value.Priority
 	}
 	normalizeCodexKey(&entry)
 	h.cfg.CodexKey[targetIndex] = entry
