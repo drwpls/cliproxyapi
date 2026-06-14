@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
@@ -27,9 +28,12 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	}
 
 	var req struct {
-		Name      string `json:"name"`
-		AuthIndex string `json:"auth_index"`
-		Disabled  *bool  `json:"disabled"`
+		Name      string         `json:"name"`
+		AuthIndex string         `json:"auth_index"`
+		Disabled  *bool          `json:"disabled"`
+		Metadata  map[string]any `json:"metadata"`
+		Type      string         `json:"type"`
+		Provider  string         `json:"provider"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
@@ -101,6 +105,11 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 			"via":              "config:excluded-models",
 			"excluded_pattern": configAPIKeyDisablePattern,
 		})
+		return
+	}
+
+	if err := h.mergeAuthFileStatusMetadata(targetAuth, req.Metadata, req.Type, req.Provider); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to merge auth metadata: %v", err)})
 		return
 	}
 
@@ -196,6 +205,96 @@ func applyAuthDisabledState(auth *coreauth.Auth, disabled bool) {
 		auth.Metadata = make(map[string]any)
 	}
 	auth.Metadata["disabled"] = disabled
+}
+
+func (h *Handler) mergeAuthFileStatusMetadata(auth *coreauth.Auth, requestMetadata map[string]any, requestType, requestProvider string) error {
+	if auth == nil {
+		return nil
+	}
+	// Layer the sources so later ones win: on-disk metadata (the persisted
+	// baseline) is overlaid by in-memory updates (e.g. a token refresh not yet
+	// flushed), then by the explicit request metadata.
+	merged := make(map[string]any)
+	if diskMetadata, errRead := h.readAuthMetadataForStatusPatch(auth); errRead == nil {
+		for key, value := range diskMetadata {
+			merged[key] = value
+		}
+	} else if !errors.Is(errRead, os.ErrNotExist) {
+		return errRead
+	}
+	for key, value := range auth.Metadata {
+		merged[key] = value
+	}
+	for key, value := range requestMetadata {
+		merged[key] = value
+	}
+
+	provider := strings.TrimSpace(requestType)
+	if provider == "" {
+		provider = strings.TrimSpace(requestProvider)
+	}
+	if provider == "" {
+		provider = strings.TrimSpace(valueAsString(merged["type"]))
+	}
+	if provider == "" {
+		provider = strings.TrimSpace(auth.Provider)
+	}
+	if provider != "" && !strings.EqualFold(provider, "unknown") {
+		merged["type"] = provider
+		auth.Provider = provider
+	}
+	auth.Metadata = merged
+	// Mirror the merged metadata into the runtime fields/attributes the
+	// executors and scheduler read (custom headers, proxy_url, prefix,
+	// priority, note, websockets). Without this, re-enabling a partially-loaded
+	// auth would republish it missing its configured headers/proxy/priority
+	// until a later file reload. Disabled state is handled by the caller.
+	syncAuthFileMetadataFields(auth, map[string]struct{}{
+		"prefix":     {},
+		"proxy_url":  {},
+		"headers":    {},
+		"priority":   {},
+		"note":       {},
+		"websockets": {},
+	})
+	return nil
+}
+
+func (h *Handler) readAuthMetadataForStatusPatch(auth *coreauth.Auth) (map[string]any, error) {
+	path := strings.TrimSpace(authAttribute(auth, "path"))
+	if path == "" {
+		path = strings.TrimSpace(authAttribute(auth, "source"))
+	}
+	if path == "" {
+		fileName := strings.TrimSpace(auth.FileName)
+		if fileName == "" {
+			fileName = strings.TrimSpace(auth.ID)
+		}
+		if fileName != "" && h != nil && h.cfg != nil {
+			authDir := strings.TrimSpace(h.cfg.AuthDir)
+			if resolvedAuthDir, errResolve := util.ResolveAuthDir(authDir); errResolve == nil && resolvedAuthDir != "" {
+				authDir = resolvedAuthDir
+			}
+			if authDir != "" {
+				path = filepath.Join(authDir, fileName)
+			}
+		}
+	}
+	if path == "" {
+		return nil, os.ErrNotExist
+	}
+	raw, errRead := os.ReadFile(path)
+	if errRead != nil {
+		return nil, errRead
+	}
+	if len(raw) == 0 {
+		return nil, os.ErrNotExist
+	}
+	metadata := make(map[string]any)
+	if errUnmarshal := json.Unmarshal(raw, &metadata); errUnmarshal != nil {
+		return nil, errUnmarshal
+	}
+	return metadata, nil
 }
 
 // PatchAuthFileFields updates arbitrary metadata fields of an auth file.
