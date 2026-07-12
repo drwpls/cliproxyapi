@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"strings"
@@ -64,7 +65,7 @@ func applyCodexPromptCacheHeadersWithContext(ctx context.Context, from sdktransl
 	return rawJSON, headers, nil
 }
 
-func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *cliproxyauth.Auth, token string, cfg *config.Config) http.Header {
+func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, executionHeaders http.Header, auth *cliproxyauth.Auth, token string, cfg *config.Config) http.Header {
 	if headers == nil {
 		headers = http.Header{}
 	}
@@ -126,6 +127,16 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	util.ApplyCustomHeadersFromAttrs(&http.Request{Header: headers}, attrs)
 
 	return headers
+}
+
+func codexWebsocketHTTPFallbackRequest(req cliproxyexecutor.Request, opts cliproxyexecutor.Options, preparedBody []byte) (cliproxyexecutor.Request, cliproxyexecutor.Options) {
+	fallbackReq := req
+	fallbackReq.Payload = bytes.Clone(preparedBody)
+	fallbackOpts := opts
+	if len(fallbackOpts.OriginalRequest) == 0 {
+		fallbackOpts.OriginalRequest = bytes.Clone(req.Payload)
+	}
+	return fallbackReq, fallbackOpts
 }
 
 func ensureCodexWebsocketSessionHeader(target http.Header, source http.Header, fallbackValue string) {

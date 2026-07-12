@@ -61,6 +61,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex websockets executor", body)
 	body = normalizeCodexWebsocketParallelToolCalls(body, opts.Headers)
+	body = normalizeCodexResponsesLiteRequest(body, opts.Headers)
+	fallbackBody := body
 	body, optimizeMultiAgentV2 := helps.OptimizeCodexMultiAgentV2Request(ctx, opts.Headers, body, e.cfg)
 	body, replayScope, errReplay := applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
 	if errReplay != nil {
@@ -81,9 +83,10 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	var identityState codexIdentityConfuseState
 	upstreamBody, identityState := applyCodexIdentityConfuseBody(e.cfg, auth, originalPayloadSource, body)
 	reporter.SetTranslatedReasoningEffort(clientBody, to.String())
-	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, auth, apiKey, e.cfg)
+	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, opts.Headers, auth, apiKey, e.cfg)
 	applyModelHeaderOverrides(wsHeaders, baseModel)
 	applyCodexIdentityConfuseHeaders(wsHeaders, &identityState)
+	forwardCodexResponsesLiteHeader(wsHeaders, opts.Headers)
 
 	var authID, authLabel, authType, authValue string
 	authID = auth.ID
@@ -151,7 +154,8 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 			if opts.ExecutionLifecycle != nil || cliproxyexecutor.DownstreamWebsocket(ctx) {
 				return nil, statusErr{code: respHS.StatusCode, msg: string(bodyErr)}
 			}
-			return e.CodexExecutor.ExecuteStream(ctx, auth, req, opts)
+			fallbackReq, fallbackOpts := codexWebsocketHTTPFallbackRequest(req, opts, fallbackBody)
+			return e.CodexExecutor.executeStreamPreparedPayload(ctx, auth, fallbackReq, fallbackOpts)
 		}
 		if respHS != nil && respHS.StatusCode > 0 {
 			if sess != nil {

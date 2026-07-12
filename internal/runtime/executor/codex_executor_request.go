@@ -397,7 +397,7 @@ func isImageGenerationFunctionTool(tool gjson.Result) bool {
 }
 
 func isCodexResponsesLiteRequest(body []byte, headers http.Header) bool {
-	if strings.EqualFold(strings.TrimSpace(headers.Get(codexResponsesLiteHeader)), "true") {
+	if strings.EqualFold(strings.TrimSpace(headerValueCaseInsensitive(headers, codexResponsesLiteHeader)), "true") {
 		return true
 	}
 	// Codex Desktop mirrors websocket-only request headers into client_metadata.
@@ -406,6 +406,105 @@ func isCodexResponsesLiteRequest(body []byte, headers http.Header) bool {
 		return false
 	}
 	return value.Type == gjson.True || value.Type == gjson.String && strings.EqualFold(strings.TrimSpace(value.String()), "true")
+}
+
+func forwardCodexResponsesLiteHeader(target, source http.Header) {
+	if target == nil {
+		return
+	}
+	deleteHeaderCaseInsensitive(target, codexResponsesLiteHeader)
+	if value := strings.TrimSpace(headerValueCaseInsensitive(source, codexResponsesLiteHeader)); value != "" {
+		target.Set(codexResponsesLiteHeader, value)
+	}
+}
+
+func normalizeCodexResponsesLiteRequest(body []byte, headers http.Header) []byte {
+	if !isCodexResponsesLiteRequest(body, headers) {
+		return body
+	}
+	normalized, err := sjson.SetBytes(body, "reasoning.context", "all_turns")
+	if err != nil {
+		return body
+	}
+	normalized = filterCodexResponsesLiteHostedTools(normalized)
+	normalized, _ = sjson.SetBytes(normalized, "parallel_tool_calls", false)
+	return normalized
+}
+
+func filterCodexResponsesLiteHostedTools(body []byte) []byte {
+	tools := gjson.GetBytes(body, "tools")
+	if tools.IsArray() {
+		kept := make([]string, 0, len(tools.Array()))
+		for _, tool := range tools.Array() {
+			if isCodexResponsesLiteHostedToolType(tool.Get("type").String()) {
+				continue
+			}
+			kept = append(kept, tool.Raw)
+		}
+		if len(kept) != len(tools.Array()) {
+			rawTools := []byte("[" + strings.Join(kept, ",") + "]")
+			if filtered, err := sjson.SetRawBytes(body, "tools", rawTools); err == nil {
+				body = filtered
+			}
+		}
+	}
+
+	toolChoice := gjson.GetBytes(body, "tool_choice")
+	if !toolChoice.Exists() {
+		return body
+	}
+	choiceType := toolChoice.String()
+	if toolChoice.IsObject() {
+		choiceType = toolChoice.Get("type").String()
+	}
+	if strings.EqualFold(strings.TrimSpace(choiceType), "allowed_tools") && toolChoice.IsObject() {
+		allowedTools := toolChoice.Get("tools")
+		if allowedTools.IsArray() {
+			kept := make([]string, 0, len(allowedTools.Array()))
+			for _, tool := range allowedTools.Array() {
+				if isCodexResponsesLiteHostedToolType(tool.Get("type").String()) {
+					continue
+				}
+				kept = append(kept, tool.Raw)
+			}
+			if len(kept) == 0 {
+				if filtered, err := sjson.DeleteBytes(body, "tool_choice"); err == nil {
+					body = filtered
+				}
+				return body
+			}
+			if len(kept) != len(allowedTools.Array()) {
+				rawTools := []byte("[" + strings.Join(kept, ",") + "]")
+				if filtered, err := sjson.SetRawBytes(body, "tool_choice.tools", rawTools); err == nil {
+					body = filtered
+				}
+			}
+		}
+	}
+	if isCodexResponsesLiteHostedToolType(choiceType) {
+		if filtered, err := sjson.DeleteBytes(body, "tool_choice"); err == nil {
+			body = filtered
+		}
+		return body
+	}
+	if strings.EqualFold(strings.TrimSpace(choiceType), "required") {
+		remainingTools := gjson.GetBytes(body, "tools")
+		if !remainingTools.IsArray() || len(remainingTools.Array()) == 0 {
+			if filtered, err := sjson.DeleteBytes(body, "tool_choice"); err == nil {
+				body = filtered
+			}
+		}
+	}
+	return body
+}
+
+func isCodexResponsesLiteHostedToolType(toolType string) bool {
+	switch strings.ToLower(strings.TrimSpace(toolType)) {
+	case "image_generation", "web_search", "web_search_preview", "file_search", "code_interpreter", "computer_use", "computer_use_preview":
+		return true
+	default:
+		return false
+	}
 }
 
 func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth.Auth, headers http.Header) []byte {
