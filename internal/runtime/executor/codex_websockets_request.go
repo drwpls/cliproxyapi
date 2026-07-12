@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"strings"
@@ -146,6 +147,16 @@ func applyCodexWebsocketHeaders(ctx context.Context, headers http.Header, auth *
 	applyCodexCloakingHeaders(headers, cfg)
 
 	return headers
+}
+
+func codexWebsocketHTTPFallbackRequest(req cliproxyexecutor.Request, opts cliproxyexecutor.Options, preparedBody []byte) (cliproxyexecutor.Request, cliproxyexecutor.Options) {
+	fallbackReq := req
+	fallbackReq.Payload = bytes.Clone(preparedBody)
+	fallbackOpts := opts
+	if len(fallbackOpts.OriginalRequest) == 0 {
+		fallbackOpts.OriginalRequest = bytes.Clone(req.Payload)
+	}
+	return fallbackReq, fallbackOpts
 }
 
 func ensureCodexWebsocketSessionHeader(target http.Header, source http.Header, fallbackValue string) {
