@@ -56,12 +56,13 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	body = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", body, originalTranslated, requestedModel, requestPath, opts.Headers)
 	body = helps.SetStringIfDifferent(body, "model", baseModel)
 	body = normalizeCodexInstructions(body)
+	liteDecision := resolveCodexResponsesLite(body, opts.Headers, baseModel)
 	if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
-		body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
+		body = ensureImageGenerationToolResolved(body, baseModel, auth, liteDecision.enabled())
 	}
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex websockets executor", body)
 	body = normalizeCodexWebsocketParallelToolCalls(body, opts.Headers)
-	body = normalizeCodexResponsesLiteRequest(body, opts.Headers)
+	body = normalizeCodexResponsesLiteRequest(body, liteDecision)
 	fallbackBody := body
 	body, optimizeMultiAgentV2 := helps.OptimizeCodexMultiAgentV2Request(ctx, opts.Headers, body, e.cfg)
 	body, replayScope, errReplay := applyCodexReasoningReplayCacheRequired(ctx, from, req, opts, body)
@@ -86,7 +87,7 @@ func (e *CodexWebsocketsExecutor) ExecuteStream(ctx context.Context, auth *clipr
 	wsHeaders = applyCodexWebsocketHeaders(ctx, wsHeaders, opts.Headers, auth, apiKey, e.cfg)
 	applyModelHeaderOverrides(wsHeaders, baseModel)
 	applyCodexIdentityConfuseHeaders(wsHeaders, &identityState)
-	forwardCodexResponsesLiteHeader(wsHeaders, opts.Headers)
+	forwardCodexResponsesLiteHeader(wsHeaders, liteDecision)
 
 	var authID, authLabel, authType, authValue string
 	authID = auth.ID

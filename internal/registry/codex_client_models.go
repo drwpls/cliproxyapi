@@ -172,3 +172,53 @@ func requiredCodexClientModelInteger(model map[string]any, field string, positiv
 	}
 	return int64(value), nil
 }
+
+type codexClientModelLiteEntry struct {
+	Slug             string `json:"slug"`
+	UseResponsesLite bool   `json:"use_responses_lite"`
+}
+
+type codexClientModelsCatalog struct {
+	Models []codexClientModelLiteEntry `json:"models"`
+}
+
+var codexResponsesLiteCache struct {
+	mu       sync.RWMutex
+	valid    bool
+	revision uint64
+	models   map[string]bool
+}
+
+// CodexClientModelUsesResponsesLite reports whether the current Codex client
+// model catalog marks the model as requiring Responses Lite compatibility.
+func CodexClientModelUsesResponsesLite(modelID string) bool {
+	modelID = strings.TrimSpace(modelID)
+	data, revision := GetCodexClientModelsSnapshot()
+
+	codexResponsesLiteCache.mu.RLock()
+	if codexResponsesLiteCache.valid && codexResponsesLiteCache.revision == revision {
+		lite := codexResponsesLiteCache.models[modelID]
+		codexResponsesLiteCache.mu.RUnlock()
+		return lite
+	}
+	codexResponsesLiteCache.mu.RUnlock()
+
+	models := make(map[string]bool)
+	var catalog codexClientModelsCatalog
+	if err := json.Unmarshal(data, &catalog); err == nil {
+		for _, model := range catalog.Models {
+			slug := strings.TrimSpace(model.Slug)
+			if slug == "" {
+				continue
+			}
+			models[slug] = model.UseResponsesLite
+		}
+	}
+
+	codexResponsesLiteCache.mu.Lock()
+	codexResponsesLiteCache.valid = true
+	codexResponsesLiteCache.revision = revision
+	codexResponsesLiteCache.models = models
+	codexResponsesLiteCache.mu.Unlock()
+	return models[modelID]
+}

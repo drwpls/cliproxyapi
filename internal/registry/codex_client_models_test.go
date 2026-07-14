@@ -206,3 +206,28 @@ func testCodexClientCatalog(t *testing.T, models ...map[string]any) []byte {
 	}
 	return data
 }
+
+func TestCodexClientModelUsesResponsesLite(t *testing.T) {
+	tests := []struct {
+		modelID string
+		want    bool
+	}{
+		{modelID: "gpt-5.6-sol", want: true},
+		{modelID: "gpt-5.6-terra", want: true},
+		{modelID: "gpt-5.6-luna", want: true},
+		{modelID: "gpt-5.5"},
+		{modelID: "gpt-5.4"},
+		{modelID: "gpt-5.4-mini"},
+		{modelID: "gpt-5.3-codex-spark"},
+		{modelID: "codex-auto-review"},
+		{modelID: "unknown-codex-model"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.modelID, func(t *testing.T) {
+			if got := CodexClientModelUsesResponsesLite(tt.modelID); got != tt.want {
+				t.Fatalf("CodexClientModelUsesResponsesLite(%q) = %v, want %v", tt.modelID, got, tt.want)
+			}
+		})
+	}
+}

@@ -727,8 +727,15 @@ func TestCodexWebsocketsResponsesLiteExecutionHeaders(t *testing.T) {
 
 			select {
 			case got := <-captured:
-				if got.liteHeader != strings.TrimSpace(tt.headerValue) {
-					t.Fatalf("upstream %s = %q, want %q", codexResponsesLiteHeader, got.liteHeader, strings.TrimSpace(tt.headerValue))
+				decision := resolveCodexResponsesLite([]byte(tt.payload), opts.Headers, model)
+				wantHeader := decision.headerValue
+				if wantHeader == "" && decision.enabled() {
+					wantHeader = "true"
+				} else if wantHeader == "" && decision.state == codexResponsesLiteExplicitFalse {
+					wantHeader = "false"
+				}
+				if got.liteHeader != wantHeader {
+					t.Fatalf("upstream %s = %q, want %q", codexResponsesLiteHeader, got.liteHeader, wantHeader)
 				}
 				hasImageTool := false
 				for _, tool := range gjson.GetBytes(got.payload, "tools").Array() {
@@ -745,7 +752,7 @@ func TestCodexWebsocketsResponsesLiteExecutionHeaders(t *testing.T) {
 				if gotReasoning := gjson.GetBytes(got.payload, "reasoning").Raw; gotReasoning != tt.wantReasoning {
 					t.Fatalf("reasoning = %s, want %s; payload=%s", gotReasoning, tt.wantReasoning, got.payload)
 				}
-				if tools := gjson.GetBytes(got.payload, "tools"); isCodexResponsesLiteRequest([]byte(got.payload), opts.Headers) && len(tools.Array()) > 0 {
+				if decision.enabled() {
 					if parallel := gjson.GetBytes(got.payload, "parallel_tool_calls"); !parallel.Exists() || parallel.Bool() {
 						t.Fatalf("parallel_tool_calls = %s, want false; payload=%s", parallel.Raw, got.payload)
 					}
@@ -754,6 +761,102 @@ func TestCodexWebsocketsResponsesLiteExecutionHeaders(t *testing.T) {
 					t.Fatalf("tool_choice = %s, want absent; payload=%s", gotChoice.Raw, got.payload)
 				} else if tt.wantChoice != "" && gotChoice.Raw != tt.wantChoice {
 					t.Fatalf("tool_choice = %s, want %s; payload=%s", gotChoice.Raw, tt.wantChoice, got.payload)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("timed out waiting for upstream websocket request")
+			}
+		})
+	}
+}
+
+func TestCodexWebsocketsResponsesLiteInferredFromCatalog(t *testing.T) {
+	tests := []struct {
+		name          string
+		stream        bool
+		payload       string
+		headers       http.Header
+		wantLite      bool
+		wantHeader    string
+		wantImageTool bool
+	}{
+		{name: "execute without tools", payload: `{"model":"gpt-5.6-sol","input":"hello","parallel_tool_calls":true}`, wantLite: true, wantHeader: "true"},
+		{name: "execute stream with hosted tools filtered", stream: true, payload: `{"model":"gpt-5.6-sol","input":"hello","tools":[{"type":"web_search"},{"type":"image_generation"}]}`, wantLite: true, wantHeader: "true"},
+		{name: "explicit false header", payload: `{"model":"gpt-5.6-sol","input":"hello"}`, headers: http.Header{codexResponsesLiteHeader: []string{"false"}}, wantHeader: "false", wantImageTool: true},
+		{name: "explicit false metadata stream", stream: true, payload: `{"model":"gpt-5.6-sol","client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":false},"input":"hello"}`, wantHeader: "false", wantImageTool: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+			type upstreamRequest struct {
+				liteHeader string
+				payload    []byte
+			}
+			captured := make(chan upstreamRequest, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := upgrader.Upgrade(w, r, nil)
+				if err != nil {
+					t.Errorf("upgrade websocket: %v", err)
+					return
+				}
+				defer func() { _ = conn.Close() }()
+
+				_, payload, errRead := conn.ReadMessage()
+				if errRead != nil {
+					t.Errorf("read upstream websocket message: %v", errRead)
+					return
+				}
+				captured <- upstreamRequest{liteHeader: r.Header.Get(codexResponsesLiteHeader), payload: bytes.Clone(payload)}
+				completed := []byte(`{"type":"response.completed","response":{"id":"resp-1","output":[],"usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}`)
+				if errWrite := conn.WriteMessage(websocket.TextMessage, completed); errWrite != nil {
+					t.Errorf("write completed websocket message: %v", errWrite)
+				}
+			}))
+			defer server.Close()
+
+			exec := NewCodexWebsocketsExecutor(&config.Config{})
+			auth := &cliproxyauth.Auth{Attributes: map[string]string{"api_key": "sk-test", "base_url": server.URL}}
+			req := cliproxyexecutor.Request{Model: "gpt-5.6-sol", Payload: []byte(tt.payload)}
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("openai-response"), Headers: tt.headers}
+
+			if tt.stream {
+				result, err := exec.ExecuteStream(context.Background(), auth, req, opts)
+				if err != nil {
+					t.Fatalf("ExecuteStream() error = %v", err)
+				}
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						t.Fatalf("stream chunk error = %v", chunk.Err)
+					}
+				}
+			} else if _, err := exec.Execute(context.Background(), auth, req, opts); err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+
+			select {
+			case got := <-captured:
+				if got.liteHeader != tt.wantHeader {
+					t.Fatalf("upstream %s = %q, want %q", codexResponsesLiteHeader, got.liteHeader, tt.wantHeader)
+				}
+				if tt.wantLite {
+					if contextValue := gjson.GetBytes(got.payload, "reasoning.context").String(); contextValue != "all_turns" {
+						t.Fatalf("reasoning.context = %q, want all_turns; payload=%s", contextValue, got.payload)
+					}
+					if parallel := gjson.GetBytes(got.payload, "parallel_tool_calls"); !parallel.Exists() || parallel.Bool() {
+						t.Fatalf("parallel_tool_calls = %s, want false; payload=%s", parallel.Raw, got.payload)
+					}
+					if tools := gjson.GetBytes(got.payload, "tools"); tools.Exists() && len(tools.Array()) != 0 {
+						t.Fatalf("tools = %s, want missing or empty after Lite normalization", tools.Raw)
+					}
+				}
+				hasImageTool := false
+				for _, tool := range gjson.GetBytes(got.payload, "tools").Array() {
+					if tool.Get("type").String() == "image_generation" {
+						hasImageTool = true
+					}
+				}
+				if hasImageTool != tt.wantImageTool {
+					t.Fatalf("image_generation present = %v, want %v; payload=%s", hasImageTool, tt.wantImageTool, got.payload)
 				}
 			case <-time.After(5 * time.Second):
 				t.Fatal("timed out waiting for upstream websocket request")
@@ -836,10 +939,10 @@ func TestNormalizeCodexResponsesLiteRequest(t *testing.T) {
 		},
 	}
 
-	headers := http.Header{codexResponsesLiteHeader: []string{"true"}}
+	decision := codexResponsesLiteDecision{state: codexResponsesLiteExplicitTrue}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := normalizeCodexResponsesLiteRequest([]byte(tt.body), headers)
+			got := normalizeCodexResponsesLiteRequest([]byte(tt.body), decision)
 			if gotReasoning := gjson.GetBytes(got, "reasoning").Raw; gotReasoning != tt.wantReasoning {
 				t.Fatalf("reasoning = %s, want %s; body=%s", gotReasoning, tt.wantReasoning, got)
 			}
@@ -861,7 +964,7 @@ func TestNormalizeCodexResponsesLiteRequest(t *testing.T) {
 	}
 
 	nonLite := []byte(`{"reasoning":{"context":"last_turn"},"parallel_tool_calls":true,"tools":[{"type":"web_search"}],"tool_choice":"web_search"}`)
-	if got := normalizeCodexResponsesLiteRequest(nonLite, http.Header{}); !bytes.Equal(got, nonLite) {
+	if got := normalizeCodexResponsesLiteRequest(nonLite, codexResponsesLiteDecision{}); !bytes.Equal(got, nonLite) {
 		t.Fatalf("non-Lite body changed: got=%s want=%s", got, nonLite)
 	}
 }
@@ -1643,7 +1746,7 @@ func TestCodexWebsocketHeadersUseExecutionResponsesLiteHeaderAtFinalPrecedence(t
 	executionHeaders := http.Header{codexResponsesLiteHeader: []string{"TRUE"}}
 
 	headers := applyCodexWebsocketHeaders(ctx, http.Header{}, executionHeaders, nil, "", nil)
-	forwardCodexResponsesLiteHeader(headers, executionHeaders)
+	forwardCodexResponsesLiteHeader(headers, resolveCodexResponsesLite(nil, executionHeaders, ""))
 
 	if got := headers.Get(codexResponsesLiteHeader); got != "TRUE" {
 		t.Fatalf("%s = %q, want TRUE", codexResponsesLiteHeader, got)
@@ -1655,7 +1758,7 @@ func TestCodexWebsocketHeadersDoNotInventResponsesLiteHeaderAtFinalPrecedence(t 
 		"header:" + codexResponsesLiteHeader: "auth-custom",
 	}}
 	headers := applyCodexWebsocketHeaders(context.Background(), http.Header{}, nil, auth, "", nil)
-	forwardCodexResponsesLiteHeader(headers, nil)
+	forwardCodexResponsesLiteHeader(headers, codexResponsesLiteDecision{})
 	if got := headers.Get(codexResponsesLiteHeader); got != "" {
 		t.Fatalf("%s = %q, want absent without execution header", codexResponsesLiteHeader, got)
 	}

@@ -408,18 +408,95 @@ func isCodexResponsesLiteRequest(body []byte, headers http.Header) bool {
 	return value.Type == gjson.True || value.Type == gjson.String && strings.EqualFold(strings.TrimSpace(value.String()), "true")
 }
 
-func forwardCodexResponsesLiteHeader(target, source http.Header) {
+type codexResponsesLiteState uint8
+
+const (
+	codexResponsesLiteInferredOrAbsent codexResponsesLiteState = iota
+	codexResponsesLiteExplicitTrue
+	codexResponsesLiteExplicitFalse
+)
+
+type codexResponsesLiteDecision struct {
+	state       codexResponsesLiteState
+	inferred    bool
+	headerValue string
+}
+
+func (decision codexResponsesLiteDecision) enabled() bool {
+	return decision.state == codexResponsesLiteExplicitTrue ||
+		decision.state == codexResponsesLiteInferredOrAbsent && decision.inferred
+}
+
+func resolveCodexResponsesLite(body []byte, headers http.Header, baseModel string) codexResponsesLiteDecision {
+	if value, ok := parseCodexResponsesLiteString(headerValueCaseInsensitive(headers, codexResponsesLiteHeader)); ok {
+		state := codexResponsesLiteExplicitFalse
+		if value {
+			state = codexResponsesLiteExplicitTrue
+		}
+		return codexResponsesLiteDecision{state: state, headerValue: strings.TrimSpace(headerValueCaseInsensitive(headers, codexResponsesLiteHeader))}
+	}
+	// Codex Desktop mirrors websocket-only request headers into client_metadata.
+	value := gjson.GetBytes(body, codexResponsesLiteMetadata)
+	if value.Exists() {
+		switch value.Type {
+		case gjson.True:
+			return codexResponsesLiteDecision{state: codexResponsesLiteExplicitTrue}
+		case gjson.False:
+			return codexResponsesLiteDecision{state: codexResponsesLiteExplicitFalse}
+		case gjson.String:
+			if parsed, ok := parseCodexResponsesLiteString(value.String()); ok {
+				state := codexResponsesLiteExplicitFalse
+				if parsed {
+					state = codexResponsesLiteExplicitTrue
+				}
+				return codexResponsesLiteDecision{state: state}
+			}
+		}
+	}
+	return codexResponsesLiteDecision{
+		state:    codexResponsesLiteInferredOrAbsent,
+		inferred: registry.CodexClientModelUsesResponsesLite(baseModel),
+	}
+}
+
+func parseCodexResponsesLiteString(value string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "true":
+		return true, true
+	case "false":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+func forwardCodexResponsesLiteHeader(target http.Header, decision codexResponsesLiteDecision) {
 	if target == nil {
 		return
 	}
 	deleteHeaderCaseInsensitive(target, codexResponsesLiteHeader)
-	if value := strings.TrimSpace(headerValueCaseInsensitive(source, codexResponsesLiteHeader)); value != "" {
+	switch decision.state {
+	case codexResponsesLiteExplicitTrue:
+		value := decision.headerValue
+		if value == "" {
+			value = "true"
+		}
 		target.Set(codexResponsesLiteHeader, value)
+	case codexResponsesLiteExplicitFalse:
+		value := decision.headerValue
+		if value == "" {
+			value = "false"
+		}
+		target.Set(codexResponsesLiteHeader, value)
+	case codexResponsesLiteInferredOrAbsent:
+		if decision.inferred {
+			target.Set(codexResponsesLiteHeader, "true")
+		}
 	}
 }
 
-func normalizeCodexResponsesLiteRequest(body []byte, headers http.Header) []byte {
-	if !isCodexResponsesLiteRequest(body, headers) {
+func normalizeCodexResponsesLiteRequest(body []byte, decision codexResponsesLiteDecision) []byte {
+	if !decision.enabled() {
 		return body
 	}
 	normalized, err := sjson.SetBytes(body, "reasoning.context", "all_turns")
@@ -508,7 +585,12 @@ func isCodexResponsesLiteHostedToolType(toolType string) bool {
 }
 
 func ensureImageGenerationTool(body []byte, baseModel string, auth *cliproxyauth.Auth, headers http.Header) []byte {
-	if isCodexResponsesLiteRequest(body, headers) {
+	decision := resolveCodexResponsesLite(body, headers, baseModel)
+	return ensureImageGenerationToolResolved(body, baseModel, auth, decision.enabled())
+}
+
+func ensureImageGenerationToolResolved(body []byte, baseModel string, auth *cliproxyauth.Auth, responsesLite bool) []byte {
+	if responsesLite {
 		return body
 	}
 	if strings.HasSuffix(baseModel, "spark") {
