@@ -125,7 +125,7 @@ func (h *Handler) ConsumeCodexResetCredit(c *gin.Context) {
 // access token, sets the ChatGPT web headers, and routes through the account's
 // configured proxy. It returns the upstream status code and raw body.
 func (h *Handler) codexBackendRequest(ctx context.Context, auth *coreauth.Auth, method, urlStr string, body []byte) (int, []byte, error) {
-	token, errToken := h.resolveTokenForAuth(ctx, auth)
+	token, errToken := h.resolveTokenForAuth(ctx, auth, "")
 	if errToken != nil {
 		return 0, nil, fmt.Errorf("resolve access token: %w", errToken)
 	}
@@ -161,7 +161,7 @@ func (h *Handler) codexBackendRequest(ctx context.Context, auth *coreauth.Auth, 
 	// No client timeout here: per project convention, timeouts are only allowed
 	// during credential acquisition (handled in resolveTokenForAuth). The
 	// request context cancels the call when the caller disconnects.
-	httpClient := &http.Client{Transport: h.apiCallTransport(auth)}
+	httpClient := &http.Client{Transport: h.apiCallTransport(auth, "")}
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
 		return 0, nil, fmt.Errorf("request failed: %w", errDo)

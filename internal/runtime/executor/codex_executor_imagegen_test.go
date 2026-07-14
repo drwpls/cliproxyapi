@@ -138,8 +138,20 @@ func TestEnsureImageGenerationTool_ResponsesLiteHeaderDoesNotInjectTool(t *testi
 }
 
 func TestEnsureImageGenerationTool_ResponsesLiteFalseMetadataStillInjectsTool(t *testing.T) {
-	body := []byte(`{"model":"gpt-5.6-sol","client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":"false"},"input":"hello"}`)
-	result := ensureImageGenerationTool(body, "gpt-5.6-sol", nil, nil)
+	for _, value := range []string{`"false"`, `false`} {
+		body := []byte(`{"model":"gpt-5.6-sol","client_metadata":{"ws_request_header_x_openai_internal_codex_responses_lite":` + value + `},"input":"hello"}`)
+		result := ensureImageGenerationTool(body, "gpt-5.6-sol", nil, nil)
+
+		if got := gjson.GetBytes(result, "tools.0.type").String(); got != "image_generation" {
+			t.Fatalf("metadata %s: tools.0.type = %q, want image_generation; body=%s", value, got, result)
+		}
+	}
+}
+
+func TestEnsureImageGenerationTool_ResponsesLiteFalseHeaderStillInjectsTool(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.6-sol","input":"hello"}`)
+	headers := http.Header{codexResponsesLiteHeader: []string{"false"}}
+	result := ensureImageGenerationTool(body, "gpt-5.6-sol", nil, headers)
 
 	if got := gjson.GetBytes(result, "tools.0.type").String(); got != "image_generation" {
 		t.Fatalf("tools.0.type = %q, want image_generation; body=%s", got, result)

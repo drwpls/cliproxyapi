@@ -55,6 +55,7 @@ func (e *CodexExecutor) execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	sourceReq := req
 	sourceReq.Payload = originalPayloadSource
 	body := bytes.Clone(req.Payload)
+	var liteDecision codexResponsesLiteDecision
 	if !payloadPrepared {
 		isCompat := e.resolveCodexModelIsCompat(auth, req, baseModel)
 		originalTranslated, translatedBody := translateCodexRequestPair(from, to, baseModel, originalPayload, req.Payload, false, isCompat)
@@ -76,13 +77,16 @@ func (e *CodexExecutor) execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		body, _ = sjson.DeleteBytes(body, "safety_identifier")
 		body, _ = sjson.DeleteBytes(body, "stream_options")
 		body = normalizeCodexInstructions(body, helps.IsNativeCodexRequest(req.Payload, opts))
+		liteDecision = resolveCodexResponsesLite(body, opts.Headers, baseModel)
 		if e.cfg == nil || e.cfg.DisableImageGeneration == config.DisableImageGenerationOff {
-			body = ensureImageGenerationTool(body, baseModel, auth, opts.Headers)
+			body = ensureImageGenerationToolResolved(body, baseModel, auth, liteDecision.enabled())
 		}
 		body = sanitizeOpenAIResponsesReasoningEncryptedContentWithCompat(ctx, "codex executor", body, isCompat)
 		body = normalizeCodexParallelToolCalls(body, opts.Headers)
 		body = helps.NormalizeCodexToolSchemas(body)
-		body = normalizeCodexResponsesLiteRequest(body, opts.Headers)
+		body = normalizeCodexResponsesLiteRequest(body, liteDecision)
+	} else {
+		liteDecision = resolveCodexResponsesLite(body, opts.Headers, baseModel)
 	}
 	body, optimizeMultiAgentV2 := helps.OptimizeCodexMultiAgentV2RequestForAuth(ctx, opts.Headers, body, e.cfg, auth, baseModel)
 	body, replayScope, errReplay := applyCodexReasoningReplayCacheRequired(ctx, from, sourceReq, opts, body)
@@ -100,7 +104,7 @@ func (e *CodexExecutor) execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	applyCodexHeaders(httpReq, auth, apiKey, true, e.cfg, opts.Headers)
 	applyModelHeaderOverrides(httpReq.Header, baseModel)
 	applyCodexIdentityConfuseHeaders(httpReq.Header, &identityState)
-	forwardCodexResponsesLiteHeader(httpReq.Header, opts.Headers)
+	forwardCodexResponsesLiteHeader(httpReq.Header, liteDecision)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
