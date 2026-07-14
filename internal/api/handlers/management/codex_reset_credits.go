@@ -8,9 +8,9 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -66,14 +66,12 @@ type consumeCodexResetRequest struct {
 	AuthIndexSnake  *string `json:"auth_index"`
 	AuthIndexCamel  *string `json:"authIndex"`
 	AuthIndexPascal *string `json:"AuthIndex"`
-	// CreditID is optional; when empty the handler redeems the most recently
-	// expired credit returned by the list endpoint.
+	// CreditID is optional; when empty upstream chooses an available credit.
 	CreditID string `json:"credit_id"`
 }
 
 // ConsumeCodexResetCredit redeems one rate-limit reset credit for a Codex
-// account. When no credit_id is supplied it looks up the most recently expired
-// credit and redeems that one.
+// account. When no credit_id is supplied upstream chooses an available credit.
 //
 // Endpoint:
 //
@@ -99,30 +97,8 @@ func (h *Handler) ConsumeCodexResetCredit(c *gin.Context) {
 	ctx := c.Request.Context()
 	creditID := strings.TrimSpace(body.CreditID)
 
-	// Resolve the credit to redeem. When the caller did not pin one, fetch the
-	// list and pick the credit whose expires_at is expired closest to now.
-	if creditID == "" {
-		status, listBody, err := h.codexBackendRequest(ctx, auth, http.MethodGet, codexResetCreditsURL, nil)
-		if err != nil {
-			log.WithError(err).Errorf("codex reset-credits list (for consume) failed: auth_index=%s", authIndex)
-			c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
-			return
-		}
-		if status < http.StatusOK || status >= http.StatusMultipleChoices {
-			log.Errorf("codex reset-credits list (for consume) upstream error: auth_index=%s status=%d body=%s", authIndex, status, codexTruncateBody(listBody))
-			c.JSON(http.StatusBadGateway, gin.H{"error": fmt.Sprintf("upstream status %d while listing credits", status), "body": string(listBody)})
-			return
-		}
-		id, found := mostRecentExpiredCreditID(listBody, time.Now())
-		if !found {
-			log.Warnf("codex reset-credits consume aborted: no expired credit auth_index=%s", authIndex)
-			c.JSON(http.StatusConflict, gin.H{"error": "no expired reset credit to consume"})
-			return
-		}
-		creditID = id
-	}
-
-	reqBody, err := codexResetCreditConsumeBody(creditID)
+	redeemRequestID := uuid.NewString()
+	reqBody, err := codexResetCreditConsumeBody(redeemRequestID, creditID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to build request body"})
 		return
@@ -203,57 +179,12 @@ func (h *Handler) codexBackendRequest(ctx context.Context, auth *coreauth.Auth, 
 	return resp.StatusCode, respBody, nil
 }
 
-func codexResetCreditConsumeBody(redeemRequestID string) ([]byte, error) {
-	return json.Marshal(map[string]string{"redeem_request_id": redeemRequestID})
-}
-
-// mostRecentExpiredCreditID returns the redeem request id (or id fallback) of
-// the credit whose expires_at is before now and closest to now.
-func mostRecentExpiredCreditID(body []byte, now time.Time) (string, bool) {
-	var parsed struct {
-		Credits []struct {
-			ID              string `json:"id"`
-			RedeemRequestID string `json:"redeem_request_id"`
-			ExpiresAt       string `json:"expires_at"`
-		} `json:"credits"`
+func codexResetCreditConsumeBody(redeemRequestID, creditID string) ([]byte, error) {
+	payload := map[string]string{"redeem_request_id": redeemRequestID}
+	if strings.TrimSpace(creditID) != "" {
+		payload["credit_id"] = strings.TrimSpace(creditID)
 	}
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return "", false
-	}
-	var selectedID string
-	var selectedExpiresAt time.Time
-	for _, credit := range parsed.Credits {
-		id := strings.TrimSpace(credit.RedeemRequestID)
-		if id == "" {
-			id = strings.TrimSpace(credit.ID)
-		}
-		if id == "" {
-			continue
-		}
-		expiresAt, ok := parseCodexResetCreditExpiresAt(credit.ExpiresAt)
-		if !ok || !expiresAt.Before(now) {
-			continue
-		}
-		if selectedID == "" || expiresAt.After(selectedExpiresAt) {
-			selectedID = id
-			selectedExpiresAt = expiresAt
-		}
-	}
-	return selectedID, selectedID != ""
-}
-
-func parseCodexResetCreditExpiresAt(raw string) (time.Time, bool) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return time.Time{}, false
-	}
-	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
-		parsed, err := time.Parse(layout, raw)
-		if err == nil {
-			return parsed, true
-		}
-	}
-	return time.Time{}, false
+	return json.Marshal(payload)
 }
 
 // codexAccountID extracts the ChatGPT account id stored on a Codex auth.
